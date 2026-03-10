@@ -334,8 +334,8 @@ def get_binary_string_patches(name: str) -> list[tuple[str, str, str]]:
          'residual "frida\\0" -> "libgc\\0"'),
         # "Frida\0" -> "Xbndl\0" (NOT "Proxy" — Proxy is a JS builtin constructor
         # used by Java bridge: new Proxy(target, handler). Overwriting it breaks Java.use())
-        ("467269646100", "58626e646c00",
-         'residual "Frida\\0" -> "Xbndl\\0"'),
+        # ("467269646100", "58626e646c00",
+        #  'residual "Frida\\0" -> "Xbndl\\0"'),
         # "FRIDA\0" -> "XBNDL\0"
         ("465249444100", "58424e444c00",
          'residual "FRIDA\\0" -> "XBNDL\\0"'),
