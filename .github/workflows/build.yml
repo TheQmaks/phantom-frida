@@ -63,16 +63,16 @@ jobs:
         uses: actions/cache@v4
         id: ndk-cache
         with:
-          path: build/android-ndk-r25c
-          key: ndk-r25c-linux
+          path: build/android-ndk-r29
+          key: ndk-r29-linux
 
       - name: Download NDK
         if: steps.ndk-cache.outputs.cache-hit != 'true'
         run: |
           mkdir -p build
-          curl -L -o build/android-ndk-r25c-linux.zip \
-            https://dl.google.com/android/repository/android-ndk-r25c-linux.zip
-          cd build && unzip -q android-ndk-r25c-linux.zip && rm android-ndk-r25c-linux.zip
+          curl -L -o build/android-ndk-r29-linux.zip \
+            https://dl.google.com/android/repository/android-ndk-r29-linux.zip
+          cd build && unzip -q android-ndk-r29-linux.zip && rm android-ndk-r29-linux.zip
 
       # Cache Frida source tree — saves ~5 min clone time
       - name: Cache Frida source
@@ -105,7 +105,7 @@ jobs:
           CMD="python3 build.py --version ${{ inputs.frida_version }}"
           CMD="$CMD --name ${{ inputs.custom_name }}"
           CMD="$CMD --arch ${{ inputs.arch }}"
-          CMD="$CMD --skip-clone --ndk-path build/android-ndk-r25c"
+          CMD="$CMD --skip-clone --ndk-path build/android-ndk-r29"
           CMD="$CMD --verify"
 
           if [ -n "${{ inputs.port }}" ]; then
