@@ -43,6 +43,9 @@ def get_source_patches(name: str, cap_name: str) -> list[tuple[str, str]]:
         ("re.frida.helper", f"re.{name}.helper"),
         ("re.frida.Gadget", f"re.{name}.Gadget"),
         ("package re.frida;", f"package re.{name};"),
+        # Also rename JNI class references, and D-Bus object paths.
+        ("re/frida/Helper", f"re/{name}/Helper"),
+        ("re/frida/Gadget", f"re/{name}/Gadget"),
 
         # --- D-Bus / service identifier ---
         ("re.frida.server", f"re.{name}.server"),
