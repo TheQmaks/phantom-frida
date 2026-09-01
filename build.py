@@ -461,6 +461,37 @@ def clone_frida(version: str, work_dir: Path) -> Path:
     return frida_dir
 
 
+def apply_page_patch(frida_dir: Path) -> None:
+    """Apply my_page.patch to the freshly cloned source tree.
+
+    my_page.patch carries the XOM-safe zygote-RX injection fix (Android 10,
+    kernel 4.9, SELinux enforcing: transiently soften execute-only text pages
+    so zymbiote injection does not SIGSEGV) plus the frida-gum page-handling
+    changes that go with it. It must run before the Phase 1 identifier renames
+    so its hunk context still matches pristine upstream source.
+    """
+    patch_file = Path(__file__).parent / "my_page.patch"
+    if not patch_file.exists():
+        log("my_page.patch not found, skipping page patch", "WARN")
+        return
+    log("Applying my_page.patch...", "STEP")
+    result = run(
+        ["git", "apply", "--whitespace=nowarn", str(patch_file)],
+        cwd=frida_dir,
+        check=False,
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        detail_lines = (result.stderr or "").strip().splitlines()
+        detail = " | ".join(detail_lines[:6]) or f"exit code {result.returncode}"
+        raise BuildError(
+            f"my_page.patch failed to apply: {detail}. Rework its hunks for "
+            "this Frida version, or remove the file to build without the "
+            "XOM injection fix."
+        )
+    log("my_page.patch applied", "OK")
+
+
 # ============================================================================
 # PHASE 1: Source-level patches (before build)
 # ============================================================================
@@ -768,6 +799,71 @@ def apply_targeted_patches(frida_dir: Path, custom_name: str, frida_major: int):
             log(f"  {target_name}: file not found", "WARN")
 
     log("Targeted patches complete", "OK")
+
+
+def apply_ndk29_fstream_patch(frida_dir: Path) -> None:
+    """Make frida's libc++ <fstream> overlay patch tolerate NDK r29+.
+
+    Frida's releng patches the NDK <fstream> header so 32-bit Android
+    API<24 uses fseek/ftell instead of the broken fseeko/ftello. The
+    expected inline ``return fseek(__file, ...)`` pattern was removed in
+    newer libc++ (NDK r29+), which restructured fstream to gate the two
+    via the _LIBCPP_HAS_NO_OFF_T_FUNCTIONS macro (defined for NEWLIB/
+    MSVCRT). Without this, older Frida releng (17.9.x) dies at the compat
+    subproject with "Failed to patch libc++ fstream header; expected
+    patterns not found".
+
+    We extend the macro's condition with the same 32-bit-Android fallback
+    so the seek behaviour is preserved, while keeping the legacy branch
+    pattern for older NDKs. Idempotent: a newer Frida releng whose
+    _patch_fstream_header no longer matches this shape is left untouched.
+    """
+    env_android = frida_dir / "releng" / "env_android.py"
+    if not env_android.exists():
+        log("  env_android.py not found, skipping NDK r29 fstream patch", "WARN")
+        return
+
+    old = (
+        "    result = header.replace(old_fseek, new_fseek)\n"
+        "    result = result.replace(old_ftell, new_ftell)\n"
+        "\n"
+        "    if result == header:\n"
+        "        raise ValueError(\"Failed to patch libc++ fstream header; expected patterns not found\")\n"
+        "\n"
+        "    return result"
+    )
+
+    new = (
+        "    result = header.replace(old_fseek, new_fseek)\n"
+        "    result = result.replace(old_ftell, new_ftell)\n"
+        "\n"
+        "    if result != header:\n"
+        "        return result\n"
+        "\n"
+        "    # Newer libc++ (NDK r29+) restructured fstream to gate fseek/fseeko\n"
+        "    # via the _LIBCPP_HAS_NO_OFF_T_FUNCTIONS macro (defined for NEWLIB/\n"
+        "    # MSVCRT). Extend that macro's condition so 32-bit Android API<24\n"
+        "    # also uses fseek/ftell, preserving the legacy branch semantics.\n"
+        "    old_macro = \"\"\"#if defined(_LIBCPP_MSVCRT) || defined(_NEWLIB_VERSION)\n"
+        "#  define _LIBCPP_HAS_NO_OFF_T_FUNCTIONS\n"
+        "#endif\"\"\"\n"
+        "\n"
+        "    new_macro = \"\"\"#if defined(_LIBCPP_MSVCRT) || defined(_NEWLIB_VERSION) || (defined(__ANDROID__) && __SIZEOF_POINTER__ == 4 && __ANDROID_API__ < 24)\n"
+        "#  define _LIBCPP_HAS_NO_OFF_T_FUNCTIONS\n"
+        "#endif\"\"\"\n"
+        "\n"
+        "    result = header.replace(old_macro, new_macro)\n"
+        "    if result == header:\n"
+        "        raise ValueError(\"Failed to patch libc++ fstream header; expected patterns not found\")\n"
+        "\n"
+        "    return result"
+    )
+
+    count = replace_in_file(env_android, old, new)
+    if count:
+        log("  env_android.py: NDK r29 fstream compat patch applied", "OK")
+    else:
+        log("  env_android.py: fstream patch pattern not found (not needed or already applied)", "OK")
 
 
 def apply_strict_wx_patch(frida_dir: Path, custom_name: str) -> None:
@@ -1921,9 +2017,16 @@ Transformations and verification boundaries:
             raise BuildError("--skip-clone requires existing source in work-dir")
         log(f"Using existing source at {frida_dir}", "OK")
 
+    # Step 2.5: Apply page patch (XOM-safe zygote injection) before the renames
+    apply_page_patch(frida_dir)
+
     # Step 3: Source patches
     apply_source_patches(frida_dir, custom_name)
     apply_targeted_patches(frida_dir, custom_name, frida_major)
+
+    # Step 3.1: NDK r29 libc++ <fstream> compat (frida releng vs newer NDK)
+    apply_ndk29_fstream_patch(frida_dir)
+
     if args.strict_wx:
         apply_strict_wx_patch(frida_dir, custom_name)
 
@@ -1954,6 +2057,23 @@ Transformations and verification boundaries:
             log("=" * 60, "HEADER")
             log(f"Building for {arch}", "STEP")
             log("=" * 60, "HEADER")
+
+            # Multi-arch support: undo the frida_agent_main rename that the
+            # previous architecture's post-build phase persisted in the source
+            # tree (include_build=True). Each architecture's fresh build tree
+            # regenerates the Vala declaration as frida_agent_main, so the
+            # source tree must call the original symbol again before
+            # configuring; otherwise the first build of this architecture
+            # mismatches declaration and call site.
+            reset_count = replace_in_tree(
+                frida_dir, f"{custom_name}_agent_main", "frida_agent_main"
+            )
+            if reset_count:
+                log(
+                    f"  Reset {custom_name}_agent_main -> frida_agent_main "
+                    f"in source ({reset_count})",
+                    "OK",
+                )
 
             # Configure
             configure_arch(frida_dir, arch, ndk_path)
